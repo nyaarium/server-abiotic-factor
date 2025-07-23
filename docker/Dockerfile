@@ -69,7 +69,7 @@ RUN chmod +x /root/install.sh \
 
 COPY docker/monitor/ /monitor/
 RUN cd /monitor \
-	&& npm i express helmet moment moment-timezone
+	&& npm i express helmet
 
 
 ############################

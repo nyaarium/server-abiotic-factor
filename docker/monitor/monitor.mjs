@@ -3,7 +3,7 @@ import fs from "fs";
 import helmet from "helmet";
 import http from "http";
 import process from "process";
-import { extractServerInfo, readServerLog } from "./log-parser.mjs";
+import { readServerLog } from "./log-parser.mjs";
 
 let LOG_FILE = `/data/logs/output.log`;
 
@@ -53,9 +53,7 @@ try {
 }
 
 async function pollServer() {
-	const statusData = readServerLog(LOG_FILE);
-	const processedStatus = extractServerInfo(statusData);
-	return processedStatus;
+	return readServerLog(LOG_FILE);
 }
 
 process.once("SIGINT", function (code) {

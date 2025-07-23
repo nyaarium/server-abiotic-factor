@@ -1,33 +1,22 @@
 import fs from "fs";
-import moment from "moment-timezone";
 import path from "path";
 
-const regexServerReady = /LogWorld: Bringing World \/Game\/Maps\/Facility\.Facility up for play/g;
-const regexPlayerConnected = /LogOnline: STEAM: Adding P2P connection information with user/g;
-const regexPlayerDisconnected = /LogOnline: STEAM: Closing all communications with user/g;
-
-/**
- * Fixes date format from Abiotic Factor server logs
- * @param {string} str - Date string from log
- * @returns {string} Standardized date string
- */
-function fixDate(str) {
-	// Convert Abiotic Factor format [YYYY.MM.DD-HH.MM.SS:MMM] to ISO format
-	// Example: [2025.02.05-17.38.04:251] -> 2025-02-05T17:38:04.251Z
-	if (str && str.match(/\[\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}:\d{3}\]/)) {
-		const match = str.match(/\[(\d{4})\.(\d{2})\.(\d{2})-(\d{2})\.(\d{2})\.(\d{2}):(\d{3})\]/);
-		if (match) {
-			const [, year, month, day, hour, minute, second, millisecond] = match;
-			return `${year}-${month}-${day}T${hour}:${minute}:${second}.${millisecond}Z`;
-		}
-	}
-	// Fallback: append Z if not already present
-	return str.endsWith("Z") ? str : str + "Z";
-}
+const regexServerReady = /LogAbiotic: Warning: Session short code: ([A-Z0-9]+)/;
+const regexPlayerConnected = /LogAbiotic: Display: CHAT LOG: .* has entered the facility\./;
+const regexPlayerDisconnected = /LogAbiotic: Display: CHAT LOG: .* has exited the facility\./;
 
 // Store last read positions for different log files
-const logPositions = new Map();
-const logStats = new Map();
+const logPositions = {};
+const logStats = {};
+const lineBuffers = {};
+
+function processAdditionalInfo(currentStatus, line) {
+	// Extract session code
+	const sessionCodeMatch = line.match(regexServerReady);
+	if (sessionCodeMatch?.[1]) {
+		currentStatus.info["Session Code"] = sessionCodeMatch[1];
+	}
+}
 
 /**
  * Reads and parses the server log file
@@ -47,20 +36,21 @@ export function readServerLog(logFilePath) {
 		const key = path.resolve(logFilePath);
 
 		// Check if file was modified (truncated or rotated)
-		const previousStats = logStats.get(key);
+		const previousStats = logStats[key];
 		if (previousStats && stats.size < previousStats.size) {
-			logPositions.delete(key);
+			delete logPositions[key];
 		}
 
 		// Update stored stats
-		logStats.set(key, stats);
+		logStats[key] = stats;
 
 		// Get last position or start at beginning
-		let position = logPositions.get(key) || 0;
+		let position = logPositions[key] || 0;
+		let lineBuffer = lineBuffers[key] || "";
 
 		let newContent = "";
 
-		if (!logStats.has(`${key}-status`)) {
+		if (!logStats[`${key}-status`]) {
 			try {
 				newContent = fs.readFileSync(logFilePath, {
 					encoding: "utf8",
@@ -69,7 +59,7 @@ export function readServerLog(logFilePath) {
 
 				// Set position for next read
 				position = stats.size;
-				logPositions.set(key, position);
+				logPositions[key] = position;
 			} catch (readError) {
 				console.error("⚠️ Error reading log file:", readError);
 			}
@@ -88,7 +78,7 @@ export function readServerLog(logFilePath) {
 
 				// Update position for next read
 				position += bytesRead;
-				logPositions.set(key, position);
+				logPositions[key] = position;
 
 				// Close the file
 				fs.closeSync(fd);
@@ -97,9 +87,19 @@ export function readServerLog(logFilePath) {
 			}
 		}
 
-		// Process the log content, using cached status on error
-		const result = processLogContent(newContent, key);
-		return result;
+		// Combine buffer with new content and split into complete lines
+		const combinedContent = lineBuffer + newContent;
+		const lines = combinedContent.split("\n");
+
+		// The last line might be incomplete, save it for next time
+		const completeLines = lines.slice(0, -1); // All but the last line
+		const incompleteLine = lines[lines.length - 1]; // The last line
+
+		// Store the incomplete line for next read
+		lineBuffers[key] = incompleteLine;
+
+		// Process the complete lines
+		return processLogContent(completeLines.join("\n"), key);
 	} catch (error) {
 		console.error("⚠️ Error reading server log:", error);
 		return { status: "error", uptime: null, error: error.message };
@@ -111,16 +111,26 @@ export function readServerLog(logFilePath) {
  * @param {string} content - Log content to process
  * @param {string} key - Unique identifier for the log file
  * @returns {Object} Server status object
+ * @example
+ * {
+ *   "status": "running",
+ *   "uptime": {
+ *     "iso":"2024-06-24T09:11:11Z",
+ *   },
+ *   "info": {
+ *     "players": 0,
+ *   },
+ * }
  */
 function processLogContent(content, key) {
 	// Get existing status or create new one
-	let currentStatus = logStats.get(`${key}-status`) || {
+	let currentStatus = logStats[`${key}-status`] || {
 		status: "starting",
 		uptime: Math.floor(Date.now() / 1000),
 	};
 
 	// Check if we have any meaningful content to process
-	const hasContent = content && content.trim() !== "";
+	const hasContent = content && content.trim();
 
 	// If no new content to process, just return current status
 	if (!hasContent) {
@@ -159,43 +169,14 @@ function processLogContent(content, key) {
 		}
 	}
 
-	// Store updated status
-	logStats.set(`${key}-status`, currentStatus);
-
-	return currentStatus;
-}
-
-/**
- * Sanitizes and processes server status JSON
- * @param {Object} json - Raw JSON object from server log
- * @returns {Object} Processed JSON with normalized uptime
- */
-export function extractServerInfo(json) {
-	// Process structure like:
-	// {
-	//   "status": "running",
-	//   "uptime": {
-	//     "iso":"2024-06-24T09:11:11Z",
-	//   },
-	//   "info": {
-	//     "players": 0,
-	//   },
-	// }
-
-	if (typeof json.uptime === "object") {
-		let uptime = json.uptime;
-		if (uptime) {
-			if (uptime.date) {
-				uptime = moment(new Date(fixDate(uptime.date))).unix();
-			} else if (uptime.iso) {
-				uptime = moment(fixDate(uptime.iso)).unix();
-			} else if (uptime.unix) {
-				uptime = Number(uptime.unix);
-			}
-
-			json.uptime = uptime;
-		}
+	// Process additional info from each line
+	const lines = content.split("\n");
+	for (const line of lines) {
+		processAdditionalInfo(currentStatus, line);
 	}
 
-	return json;
+	// Store the final result
+	logStats[`${key}-status`] = currentStatus;
+
+	return currentStatus;
 }
