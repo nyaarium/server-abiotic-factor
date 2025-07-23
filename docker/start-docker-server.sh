@@ -6,8 +6,9 @@ cd $SERVERDIR
 _term() { 
 	echo "Caught kill signal! Gracefully shutting down."
 
-	# echo "shutdown" > /app/input.fifo
-	docker kill --signal=SIGTERM "$APP_NAME" || true
+	# Send SIGINT (Ctrl+C) to the server process
+	kill -INT "$child_server" 2>/dev/null || true
+	# echo "/stop" > input.fifo
 
 	was_gracefully_killed=true
 	
